@@ -187,12 +187,238 @@ function HomescreenWidget:init()
                 range = function() return self.dimen end,
             },
         },
+        -- Forward gesture types to the FM gestures plugin so that all
+        -- custom gestures configured in the library also work on the homescreen.
+        -- Each handler resolves the canonical gesture name (e.g.
+        -- "one_finger_swipe_left_edge_down") and delegates to gestureAction().
+        HSSwipe = {
+            GestureRange:new{
+                ges   = "swipe",
+                range = function() return self.dimen end,
+            },
+        },
+        HSDoubleTap = {
+            GestureRange:new{
+                ges   = "double_tap",
+                range = function() return self.dimen end,
+            },
+        },
+        HSTwoFingerTap = {
+            GestureRange:new{
+                ges   = "two_finger_tap",
+                range = function() return self.dimen end,
+            },
+        },
+        HSTwoFingerSwipe = {
+            GestureRange:new{
+                ges   = "two_finger_swipe",
+                range = function() return self.dimen end,
+            },
+        },
+        HSMultiswipe = {
+            GestureRange:new{
+                ges   = "multiswipe",
+                range = function() return self.dimen end,
+            },
+        },
+        HSSpread = {
+            GestureRange:new{
+                ges   = "spread",
+                range = function() return self.dimen end,
+            },
+        },
+        HSPinch = {
+            GestureRange:new{
+                ges   = "pinch",
+                range = function() return self.dimen end,
+            },
+        },
+        HSRotate = {
+            GestureRange:new{
+                ges   = "rotate",
+                range = function() return self.dimen end,
+            },
+        },
     }
-    function self:onBlockNavbarTap(ges)
-        if _in_bar(ges) then return true end  -- consume; bar handles it
+    -- ---------------------------------------------------------------------------
+    -- _fmGestureAction — resolve gesture name and delegate to FM gestures plugin.
+    --
+    -- Works by replicating the same zone/direction logic that gestures.koplugin
+    -- uses in setupGesture(), so the HS honours exactly the same gesture_fm
+    -- bindings the user configured in the library — without duplicating settings
+    -- or creating a second plugin instance.
+    --
+    -- Hold events are handled by onBlockNavbarHold (navbar guard) and the module
+    -- hold-to-settings wrappers.  Corner hold gestures (hold_top_left_corner,
+    -- etc.) are intentionally NOT forwarded here to avoid conflicting with those
+    -- existing hold handlers.  The user can still invoke corner-tap/swipe actions.
+    -- ---------------------------------------------------------------------------
+    local function _fmGestureAction(ges_event)
+        local FileManager = require("apps/filemanager/filemanager")
+        local g = FileManager.instance and FileManager.instance.gestures
+        if not g then return end
+
+        -- G_defaults is a KOReader global (set up in reader.lua before any plugin loads).
+        local sw = Screen:getWidth()
+        local sh = Screen:getHeight()
+        local pos = ges_event.pos
+        if not pos then return end
+        local x, y = pos.x, pos.y
+        local gt    = ges_event.ges
+        local dir   = ges_event.direction
+
+        -- Helper: is pos inside a ratio-defined zone?
+        local function inZone(z)
+            local zx = z.ratio_x * sw
+            local zy = z.ratio_y * sh
+            local zw = z.ratio_w * sw
+            local zh = z.ratio_h * sh
+            return x >= zx and x < zx + zw and y >= zy and y < zy + zh
+        end
+
+        -- Read zone definitions from G_defaults (same source as gestures plugin).
+        local function zone(key)
+            local d = G_defaults:readSetting(key)
+            return { ratio_x = d.x, ratio_y = d.y, ratio_w = d.w, ratio_h = d.h }
+        end
+
+        local z_top_left    = zone("DTAP_ZONE_TOP_LEFT")
+        local z_top_right   = zone("DTAP_ZONE_TOP_RIGHT")
+        local z_bot_left    = zone("DTAP_ZONE_BOTTOM_LEFT")
+        local z_bot_right   = zone("DTAP_ZONE_BOTTOM_RIGHT")
+        local z_left_edge   = zone("DSWIPE_ZONE_LEFT_EDGE")
+        local z_right_edge  = zone("DSWIPE_ZONE_RIGHT_EDGE")
+        local z_top_edge    = zone("DSWIPE_ZONE_TOP_EDGE")
+        local z_bot_edge    = zone("DSWIPE_ZONE_BOTTOM_EDGE")
+        local z_left_side   = zone("DDOUBLE_TAP_ZONE_PREV_CHAPTER")
+        local z_right_side  = zone("DDOUBLE_TAP_ZONE_NEXT_CHAPTER")
+
+        local ges_name
+
+        if gt == "swipe" then
+            local is_diag = dir == "northeast" or dir == "northwest"
+                         or dir == "southeast" or dir == "southwest"
+            if is_diag then
+                -- short_diagonal_swipe: only fires when distance is short.
+                local short_thresh = Screen:scaleBySize(300)
+                if ges_event.distance and ges_event.distance <= short_thresh then
+                    ges_name = "short_diagonal_swipe"
+                end
+            elseif inZone(z_left_edge) then
+                if     dir == "south" then ges_name = "one_finger_swipe_left_edge_down"
+                elseif dir == "north" then ges_name = "one_finger_swipe_left_edge_up"
+                end
+            elseif inZone(z_right_edge) then
+                if     dir == "south" then ges_name = "one_finger_swipe_right_edge_down"
+                elseif dir == "north" then ges_name = "one_finger_swipe_right_edge_up"
+                end
+            elseif inZone(z_top_edge) then
+                if     dir == "east" then ges_name = "one_finger_swipe_top_edge_right"
+                elseif dir == "west" then ges_name = "one_finger_swipe_top_edge_left"
+                end
+            elseif inZone(z_bot_edge) then
+                if     dir == "east" then ges_name = "one_finger_swipe_bottom_edge_right"
+                elseif dir == "west" then ges_name = "one_finger_swipe_bottom_edge_left"
+                end
+            end
+
+        elseif gt == "tap" then
+            -- Corner taps — only if not in the navbar bar area (already guarded
+            -- by onBlockNavbarTap above, but double-check here for clarity).
+            if     inZone(z_top_left)  then ges_name = "tap_top_left_corner"
+            elseif inZone(z_top_right) then ges_name = "tap_top_right_corner"
+            elseif inZone(z_bot_left)  then ges_name = "tap_left_bottom_corner"
+            elseif inZone(z_bot_right) then ges_name = "tap_right_bottom_corner"
+            end
+
+        elseif gt == "double_tap" then
+            if     inZone(z_left_side)  then ges_name = "double_tap_left_side"
+            elseif inZone(z_right_side) then ges_name = "double_tap_right_side"
+            elseif inZone(z_top_left)   then ges_name = "double_tap_top_left_corner"
+            elseif inZone(z_top_right)  then ges_name = "double_tap_top_right_corner"
+            elseif inZone(z_bot_left)   then ges_name = "double_tap_bottom_left_corner"
+            elseif inZone(z_bot_right)  then ges_name = "double_tap_bottom_right_corner"
+            end
+
+        elseif gt == "two_finger_tap" then
+            if     inZone(z_top_left)  then ges_name = "two_finger_tap_top_left_corner"
+            elseif inZone(z_top_right) then ges_name = "two_finger_tap_top_right_corner"
+            elseif inZone(z_bot_left)  then ges_name = "two_finger_tap_bottom_left_corner"
+            elseif inZone(z_bot_right) then ges_name = "two_finger_tap_bottom_right_corner"
+            end
+
+        elseif gt == "two_finger_swipe" then
+            if     dir == "east"      then ges_name = "two_finger_swipe_east"
+            elseif dir == "west"      then ges_name = "two_finger_swipe_west"
+            elseif dir == "north"     then ges_name = "two_finger_swipe_north"
+            elseif dir == "south"     then ges_name = "two_finger_swipe_south"
+            elseif dir == "northeast" then ges_name = "two_finger_swipe_northeast"
+            elseif dir == "northwest" then ges_name = "two_finger_swipe_northwest"
+            elseif dir == "southeast" then ges_name = "two_finger_swipe_southeast"
+            elseif dir == "southwest" then ges_name = "two_finger_swipe_southwest"
+            end
+
+        elseif gt == "multiswipe" then
+            return g:multiswipeAction(ges_event.multiswipe_directions, ges_event)
+
+        elseif gt == "spread" then
+            ges_name = "spread_gesture"
+        elseif gt == "pinch" then
+            ges_name = "pinch_gesture"
+        elseif gt == "rotate" then
+            if     dir == "cw"  then ges_name = "rotate_cw"
+            elseif dir == "ccw" then ges_name = "rotate_ccw"
+            end
+        end
+
+        if ges_name then
+            -- gestureAction internally calls UIManager:sendEvent, which only
+            -- delivers to the TOP widget (HomescreenWidget). Since HS doesn't
+            -- handle most actions (frontlight, fullrefresh, etc.), the events
+            -- would never reach FM's DeviceListener.
+            -- Fix: temporarily redirect UIManager.sendEvent → broadcastEvent
+            -- so every action event reaches all widgets including FM.
+            local orig_sendEvent = UIManager.sendEvent
+            UIManager.sendEvent = function(um, event)
+                return UIManager:broadcastEvent(event)
+            end
+            local ok, err = pcall(g.gestureAction, g, ges_name, ges_event)
+            UIManager.sendEvent = orig_sendEvent
+            if not ok then
+                logger.warn("simpleui hs gesture: gestureAction error:", err)
+            end
+            return true
+        end
     end
-    function self:onBlockNavbarHold(ges)
-        if _in_bar(ges) then return true end
+
+    -- NOTE: ges_events handlers receive (args, ev) because InputContainer dispatches via
+    -- Event:new(eventname, gsseq.args, ev) and EventListener unpacks event.args as positional
+    -- parameters: self:handler(gsseq.args, ev).  Since we never set gsseq.args the first
+    -- parameter is always nil; the actual gesture table is the second parameter.
+    function self:onHSSwipe(_args, ges)        return _fmGestureAction(ges) end
+    function self:onHSTwoFingerSwipe(_args, ges) return _fmGestureAction(ges) end
+    function self:onHSDoubleTap(_args, ges)    return _fmGestureAction(ges) end
+    function self:onHSTwoFingerTap(_args, ges) return _fmGestureAction(ges) end
+    function self:onHSMultiswipe(_args, ges)   return _fmGestureAction(ges) end
+    function self:onHSSpread(_args, ges)       return _fmGestureAction(ges) end
+    function self:onHSPinch(_args, ges)        return _fmGestureAction(ges) end
+    function self:onHSRotate(_args, ges)       return _fmGestureAction(ges) end
+
+    -- Tap forwarding: only fires for taps that land in a corner zone AND were
+    -- NOT consumed by onBlockNavbarTap (which returns true for navbar taps).
+    -- Since onBlockNavbarTap runs first (it is defined first in ges_events) and
+    -- returns nil for non-navbar taps, InputContainer will continue dispatching
+    -- and reach this handler.  We therefore forward corner taps here; taps that
+    -- fall outside all corner zones produce no ges_name and are silently ignored.
+    function self:onBlockNavbarTap(_args, ges)
+        if _in_bar(ges) then return true end  -- consume navbar taps
+        return _fmGestureAction(ges)          -- forward corner taps to FM gestures
+    end
+    function self:onBlockNavbarHold(_args, ges)
+        if _in_bar(ges) then return true end  -- consume navbar holds
+        -- Corner holds are intentionally NOT forwarded: the module
+        -- hold-to-settings wrappers own holds on their own dimen, and
+        -- hold_*_corner gestures would conflict with that UX.
     end
 
     self.title_bar = TitleBar:new{
