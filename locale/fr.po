@@ -545,10 +545,10 @@ msgid "daily avg (7 days)"
 msgstr "moy./jour (7 jours)"
 
 msgid "day streak"
-msgstr "jour de lecture"
+msgstr "jour de suite"
 
 msgid "days streak"
-msgstr "jours de lecture"
+msgstr "jours de suite"
 
 msgid "disabled"
 msgstr "désactivé"
