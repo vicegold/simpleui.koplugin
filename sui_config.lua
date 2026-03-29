@@ -1041,7 +1041,14 @@ function M.openStatsDB()
     local db_path = M.getStatsDbPath()
     if not _lfs_mod.attributes(db_path, "mode") then return nil end
     local ok, conn = pcall(function() return _SQ3.open(db_path) end)
-    return ok and conn or nil
+    if not (ok and conn) then return nil end
+    -- Create indexes on first open to speed up md5-based stats queries.
+    -- These are no-ops if the indexes already exist (IF NOT EXISTS).
+    pcall(function()
+        conn:exec("CREATE INDEX IF NOT EXISTS idx_simpleui_book_md5 ON book(md5);")
+        conn:exec("CREATE INDEX IF NOT EXISTS idx_simpleui_pagestat_book ON page_stat(id_book);")
+    end)
+    return conn
 end
 
 -- ---------------------------------------------------------------------------

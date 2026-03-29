@@ -54,6 +54,20 @@ local _COMPACT_BAR_H   = Screen:scaleBySize(7)
 local _COMPACT_LBL_W   = Screen:scaleBySize(44)
 local _COMPACT_COL_GAP = Screen:scaleBySize(8)
 
+-- Pre-resolved compact font faces — computed once at module load since
+-- _COMPACT_ROW_FS / _COMPACT_SUB_FS are fixed constants, not user-scalable.
+-- Avoids Font:getFace calls inside buildCompactGoalRow on every render.
+local _COMPACT_FACE_ROW -- forward-declared; resolved lazily on first use
+local _COMPACT_FACE_SUB -- so Font is available at resolution time
+local function _getCompactFaces()
+    if not _COMPACT_FACE_ROW then
+        local Font = require("ui/font")
+        _COMPACT_FACE_ROW = Font:getFace("smallinfofont", _COMPACT_ROW_FS)
+        _COMPACT_FACE_SUB = Font:getFace("cfont",         _COMPACT_SUB_FS)
+    end
+    return _COMPACT_FACE_ROW, _COMPACT_FACE_SUB
+end
+
 local function _getYearStr() return os.date("%Y") end
 
 -- Settings keys
@@ -198,7 +212,7 @@ end
 -- Builds a single inline row: Label [bar] XX%  detail
 -- Used by the Compact layout. All elements are horizontally laid out and vertically centred.
 -- lbl_w is pre-computed by _measureLblW so both rows share the same column width.
-local function buildCompactGoalRow(inner_w, lbl_w, pct_w, label_str, pct, pct_str, detail_str, on_tap)
+local function buildCompactGoalRow(inner_w, lbl_w, pct_w, label_str, pct, pct_str, detail_str, on_tap, face_row, face_sub)
     local LeftContainer  = require("ui/widget/container/leftcontainer")
     local RightContainer = require("ui/widget/container/rightcontainer")
 
@@ -232,7 +246,7 @@ local function buildCompactGoalRow(inner_w, lbl_w, pct_w, label_str, pct, pct_st
         align = "center",
         vcenter_left(TextWidget:new{
             text    = label_str,
-            face    = Font:getFace("smallinfofont", _COMPACT_ROW_FS),
+            face    = face_row,
             bold    = true,
             fgcolor = _CLR_TEXT_LBL,
             width   = lbl_w,
@@ -242,7 +256,7 @@ local function buildCompactGoalRow(inner_w, lbl_w, pct_w, label_str, pct, pct_st
         HorizontalSpan:new{ width = BAR_PCT_GAP },
         vcenter_left(TextWidget:new{
             text    = pct_str,
-            face    = Font:getFace("smallinfofont", _COMPACT_ROW_FS),
+            face    = face_row,
             bold    = true,
             fgcolor = _CLR_TEXT_PCT,
             width   = PCT_W,
@@ -250,7 +264,7 @@ local function buildCompactGoalRow(inner_w, lbl_w, pct_w, label_str, pct, pct_st
         HorizontalSpan:new{ width = PCT_DETAIL_GAP },
         vcenter_right(TextWidget:new{
             text      = detail_str,
-            face      = Font:getFace("cfont", _COMPACT_SUB_FS),
+            face      = face_sub,
             fgcolor   = CLR_TEXT_SUB,
             width     = DETAIL_W,
             alignment = "right",
@@ -479,7 +493,10 @@ function M.build(w, ctx)
     local rows = VerticalGroup:new{ align = "left" }
 
     if isCompact() then
-        local face = Font:getFace("smallinfofont", _COMPACT_ROW_FS)
+        -- Resolve faces once; pass to buildCompactGoalRow to avoid Font:getFace per row.
+        local _face_row, _face_sub = _getCompactFaces()
+        -- Capture year string once — avoids repeated os.date calls.
+        local year_str = _getYearStr()
         -- Pre-compute data for both rows so we can measure pct_w across both
         -- and use the same column width, preventing overlap when pct >= 100%.
         local ann_pct, ann_pct_str, ann_detail
@@ -490,45 +507,47 @@ function M.build(w, ctx)
         local pct_strs = {}
         if show_ann and ann_pct_str ~= "" then pct_strs[#pct_strs+1] = ann_pct_str end
         if show_day and day_pct_str ~= "" then pct_strs[#pct_strs+1] = day_pct_str end
-        local pct_w = _measureLblW(pct_strs, face, Screen:scaleBySize(28))
+        local pct_w = _measureLblW(pct_strs, _face_row, Screen:scaleBySize(28))
         if show_ann then
-            local lbl_w = _measureLblW({ _getYearStr() }, face, _COMPACT_LBL_W)
+            local lbl_w = _measureLblW({ year_str }, _face_row, _COMPACT_LBL_W)
             rows[#rows+1] = buildCompactGoalRow(
-                inner_w, lbl_w, pct_w, _getYearStr(), ann_pct, ann_pct_str, ann_detail,
-                function() showAnnualGoalDialog() end)
+                inner_w, lbl_w, pct_w, year_str, ann_pct, ann_pct_str, ann_detail,
+                function() showAnnualGoalDialog() end, _face_row, _face_sub)
         end
         if show_ann and show_day then
             rows[#rows+1] = VerticalSpan:new{ width = _COMPACT_ROW_GAP }
         end
         if show_day then
-            local lbl_w = _measureLblW({ _("Today") }, face, _COMPACT_LBL_W)
+            local lbl_w = _measureLblW({ _("Today") }, _face_row, _COMPACT_LBL_W)
             rows[#rows+1] = buildCompactGoalRow(
                 inner_w, lbl_w, pct_w, _("Today"), day_pct, day_pct_str, day_detail,
-                function() showDailySettingsDialog() end)
+                function() showDailySettingsDialog() end, _face_row, _face_sub)
         end
     else
-        local scale = Config.getModuleScale("reading_goals", ctx.pfx)
-        local d     = _scaledDims(scale)
+        local scale    = Config.getModuleScale("reading_goals", ctx.pfx)
+        local d        = _scaledDims(scale)
+        -- Capture year string once — avoids repeated os.date calls.
+        local year_str = _getYearStr()
         if show_ann then
             local pct, pct_str, detail = _annualData(books_read)
-            local ann_d = {}
-            for k, v in pairs(d) do ann_d[k] = v end
-            ann_d.lbl_w = _measureLblW({ _getYearStr() }, d.face_row, d.lbl_w)
+            -- Measure the label width and store directly in d (single shared table).
+            -- Each row gets a different lbl_w, so we restore after the second row.
+            local ann_lbl_w = _measureLblW({ year_str }, d.face_row, d.lbl_w)
+            d.lbl_w = ann_lbl_w
             rows[#rows+1] = buildGoalRow(
-                inner_w, _getYearStr(), pct, pct_str, detail,
-                function() showAnnualGoalDialog() end, ann_d)
+                inner_w, year_str, pct, pct_str, detail,
+                function() showAnnualGoalDialog() end, d)
         end
         if show_ann and show_day then
             rows[#rows+1] = VerticalSpan:new{ width = d.row_gap }
         end
         if show_day then
             local pct, pct_str, detail = _dailyData(today_secs)
-            local day_d = {}
-            for k, v in pairs(d) do day_d[k] = v end
-            day_d.lbl_w = _measureLblW({ _("Today") }, d.face_row, d.lbl_w)
+            local day_lbl_w = _measureLblW({ _("Today") }, d.face_row, d.lbl_w)
+            d.lbl_w = day_lbl_w
             rows[#rows+1] = buildGoalRow(
                 inner_w, _("Today"), pct, pct_str, detail,
-                function() showDailySettingsDialog() end, day_d)
+                function() showDailySettingsDialog() end, d)
         end
     end
 

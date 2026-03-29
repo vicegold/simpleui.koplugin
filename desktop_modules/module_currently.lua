@@ -94,13 +94,14 @@ local _bstats_cache = {}
 
 -- Builds a progress bar with an inline percentage label: [▓▓▓░░░░] XX%
 -- bar_gap_w is applied as padding_bottom so the caller controls the gap below.
-local function buildProgressBarWithPct(w, pct, bar_h, bar_gap_w, scale, lbl_scale)
-    local fs      = math.max(7, math.floor(_BASE_INLINEPCT_FS * scale * lbl_scale))
+local function buildProgressBarWithPct(w, pct, bar_h, bar_gap_w, scale, lbl_scale, face_inline)
     local PCT_W   = math.max(16, math.floor(_BASE_PCT_W       * scale * lbl_scale))
     local GAP     = math.max(2,  math.floor(_BASE_BAR_PCT_GAP * scale))
     local bar_w   = math.max(10, w - GAP - PCT_W)
     local fw      = math.max(0, math.floor(bar_w * math.min(pct, 1.0)))
     local pct_str = string.format("%d%%", math.floor((pct or 0) * 100))
+    -- face_inline is pre-resolved by build(); fallback for direct calls.
+    local _face   = face_inline or Font:getFace("smallinfofont", math.max(7, math.floor(_BASE_INLINEPCT_FS * scale * lbl_scale)))
 
     local bar
     if fw <= 0 then
@@ -119,7 +120,7 @@ local function buildProgressBarWithPct(w, pct, bar_h, bar_gap_w, scale, lbl_scal
         HorizontalSpan:new{ width = GAP },
         TextWidget:new{
             text    = pct_str,
-            face    = Font:getFace("smallinfofont", fs),
+            face    = _face,
             bold    = true,
             fgcolor = _CLR_DARK,
             width   = PCT_W,
@@ -180,26 +181,31 @@ local function fetchBookStats(md5, shared_conn, force_fresh)
 
     local result = nil
     local ok, err = pcall(function()
+        -- Single-pass CTE: resolves book id once, then one GROUP BY scan.
+        -- Replaces 3 correlated subqueries + derived table with a single pass.
+        -- Relies on idx_simpleui_book_md5 / idx_simpleui_pagestat_book indexes
+        -- created by openStatsDB() for O(log n) lookup instead of full-table scan.
         local row = conn:exec(string.format([[
-            SELECT
-                (SELECT count(DISTINCT date(ps2.start_time, 'unixepoch', 'localtime'))
-                 FROM page_stat ps2
-                 JOIN book b2 ON b2.id = ps2.id_book
-                 WHERE b2.md5 = %q),
-                (SELECT sum(ps3.duration)
-                 FROM page_stat ps3
-                 JOIN book b3 ON b3.id = ps3.id_book
-                 WHERE b3.md5 = %q),
-                count(*),
-                sum(min_dur)
-            FROM (
-                SELECT min(sum(ps.duration), %d) AS min_dur
+            WITH b AS (
+                SELECT id FROM book WHERE md5 = %q LIMIT 1
+            ),
+            ps_agg AS (
+                SELECT ps.page,
+                       sum(ps.duration)   AS page_dur,
+                       min(ps.start_time) AS first_start
                 FROM page_stat ps
-                JOIN book ON book.id = ps.id_book
-                WHERE book.md5 = %q
+                WHERE ps.id_book = (SELECT id FROM b)
                 GROUP BY ps.page
-            );
-        ]], md5, md5, _MAX_SEC, md5))
+            )
+            SELECT
+                count(DISTINCT date(first_start, 'unixepoch', 'localtime')),
+                (SELECT sum(ps2.duration)
+                 FROM page_stat ps2
+                 WHERE ps2.id_book = (SELECT id FROM b)),
+                count(*),
+                sum(min(page_dur, %d))
+            FROM ps_agg;
+        ]], md5, _MAX_SEC))
 
         if row and row[1] and row[1][1] then
             local days   = tonumber(row[1][1]) or 0
@@ -359,7 +365,15 @@ function M.build(w, ctx)
         bstats = fetchBookStats(book_md5, ctx.db_conn, ctx.fresh)
     end
 
-    local bar_style = getBarStyle(pfx)
+    local bar_style   = getBarStyle(pfx)
+    local stats_style = getStatsStyle(pfx)
+
+    -- Pre-resolve the inline-pct font face once for buildProgressBarWithPct.
+    local face_inlinepct = Font:getFace("smallinfofont",
+        math.max(7, math.floor(_BASE_INLINEPCT_FS * scale * lbl_scale)))
+
+    -- Capture element order once; reused by both the main loop and compact inner loop.
+    local elem_order = _getElemOrder(pfx)
 
     -- Flag to ensure the compact stats row is rendered only once,
     -- at the position of the first visible stats element in the Arrange order.
@@ -374,7 +388,7 @@ function M.build(w, ctx)
     end
 
     -- Append each visible element to meta in user-configured order.
-    for _i, elem in ipairs(_getElemOrder(pfx)) do
+    for _i, elem in ipairs(elem_order) do
         if elem == "title" and show.title then
             gap_before(title_gap)
             meta[#meta+1] = TextBoxWidget:new{
@@ -399,7 +413,7 @@ function M.build(w, ctx)
         elseif elem == "progress" and show.progress then
             gap_before(bar_gap)
             if bar_style == "with_pct" then
-                meta[#meta+1] = buildProgressBarWithPct(tw, bd.percent, bar_h, bar_gap, scale, lbl_scale)
+                meta[#meta+1] = buildProgressBarWithPct(tw, bd.percent, bar_h, bar_gap, scale, lbl_scale, face_inlinepct)
             else
                 meta[#meta+1] = SH.progressBar(tw, bd.percent, bar_h)
             end
@@ -417,7 +431,7 @@ function M.build(w, ctx)
             meta_has_content = true
 
         elseif elem == "book_days" and show.days and bstats and bstats.days > 0
-               and getStatsStyle(pfx) == "default" then
+               and stats_style == "default" then
             gap_before(pct_gap)
             local days_label = bstats.days == 1
                 and _("1 day of reading")
@@ -431,7 +445,7 @@ function M.build(w, ctx)
             meta_has_content = true
 
         elseif elem == "book_time" and show.time and bstats and bstats.total_secs > 0
-               and getStatsStyle(pfx) == "default" then
+               and stats_style == "default" then
             gap_before(pct_gap)
             meta[#meta+1] = TextWidget:new{
                 text    = string.format(_("%s read"), fmtTime(bstats.total_secs)),
@@ -442,7 +456,7 @@ function M.build(w, ctx)
             meta_has_content = true
 
         elseif elem == "book_remaining" and show.remain
-               and getStatsStyle(pfx) == "default" then
+               and stats_style == "default" then
             -- Prefer the capped avg_time from fetchBookStats to avoid over-estimating
             -- remaining time when pages had long idle pauses.
             local avg_t = (bstats and bstats.avg_time and bstats.avg_time > 0)
@@ -463,7 +477,7 @@ function M.build(w, ctx)
             end
 
         elseif (elem == "book_days" or elem == "book_time" or elem == "book_remaining")
-               and getStatsStyle(pfx) == "compact" then
+               and stats_style == "compact" then
             -- Compact mode: single row following the Arrange Items order.
             -- Fires on the first visible stats element encountered; the others are
             -- consumed here so they don't produce a second row when the loop reaches them.
@@ -482,7 +496,7 @@ function M.build(w, ctx)
 
                 -- Build parts in Arrange Items order, walking the full element order.
                 local parts = {}
-                for _i, e in ipairs(_getElemOrder(pfx)) do
+                for _i, e in ipairs(elem_order) do
                     if e == "book_time" and show.time and bstats and bstats.total_secs > 0 then
                         parts[#parts+1] = string.format(_("%s read"), fmtTime(bstats.total_secs))
                     elseif e == "book_remaining" and show.remain and secs_left then
@@ -584,7 +598,8 @@ function M.getHeight(_ctx)
     if active_stats > 0 then
         local stats_line_h = math.max(7, math.floor(_BASE_STATS_FS * scale * lbl_scale))
         local gap          = math.max(1, math.floor(_BASE_PCT_GAP  * scale))
-        local lines = getStatsStyle(pfx) == "compact" and 1 or active_stats
+        local _stats_style = getStatsStyle(pfx)
+    local lines = _stats_style == "compact" and 1 or active_stats
         h = h + gap + stats_line_h * lines
     end
 

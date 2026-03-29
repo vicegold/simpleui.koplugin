@@ -223,6 +223,65 @@ local function getDocSettings()
     return _DocSettings
 end
 
+-- ---------------------------------------------------------------------------
+-- Sidecar metadata cache — invalidated by mtime, lives for the process lifetime.
+--
+-- Each entry: { sidecar_path, mtime, preferred_loc, data={...} }
+-- where data holds all keys extracted by prefetchBooks + summary for countMarkedRead.
+--
+-- Cost per cache hit: 1 lfs.attributes("modification") instead of ~15 syscalls
+-- + 1 dofile. Cache miss falls through to the normal DS.open path.
+-- ---------------------------------------------------------------------------
+local _sidecar_cache = {}
+
+-- Returns the preferred_location string used as part of cache validation.
+-- Reading G_reader_settings is a table lookup — no IO.
+local function _prefLoc()
+    return G_reader_settings:readSetting("document_metadata_folder", "doc")
+end
+
+-- Returns cached data table for fp, or nil on miss / stale entry.
+local function _cacheGet(fp)
+    local e = _sidecar_cache[fp]
+    if not e then return nil end
+    -- Invalidate if the user changed metadata location between sessions.
+    if e.preferred_loc ~= _prefLoc() then
+        _sidecar_cache[fp] = nil
+        return nil
+    end
+    -- 1 syscall: stat the sidecar file we recorded on last DS.open.
+    local mtime = lfs.attributes(e.sidecar_path, "modification")
+    if mtime ~= e.mtime then
+        _sidecar_cache[fp] = nil
+        return nil
+    end
+    return e.data
+end
+
+-- Stores a cache entry after a successful DS.open.
+-- source_candidate is ds.source_candidate (the winning sidecar path chosen by DS.open).
+local function _cachePut(fp, source_candidate, data)
+    if not source_candidate then return end
+    local mtime = lfs.attributes(source_candidate, "modification")
+    if not mtime then return end
+    _sidecar_cache[fp] = {
+        sidecar_path  = source_candidate,
+        mtime         = mtime,
+        preferred_loc = _prefLoc(),
+        data          = data,
+    }
+end
+
+-- Invalidate one entry (call before prefetchBooks for the just-closed book)
+-- or flush everything (fp == nil).
+function SH.invalidateSidecarCache(fp)
+    if fp then
+        _sidecar_cache[fp] = nil
+    else
+        _sidecar_cache = {}
+    end
+end
+
 function SH.getBookData(filepath, prefetched, shared_conn)
     local meta = {}
     local percent, pages, md5, stat_pages, stat_total_time = 0, nil, nil, nil, nil
@@ -339,24 +398,32 @@ function SH.prefetchBooks(show_currently, show_recent)
                 -- Claim as currently-reading book.
                 state.current_fp = fp
                 if DS then
-                    local ok2, ds = pcall(DS.open, DS, fp)
-                    if ok2 and ds then
-                        local rp = ds:readSetting("doc_props") or {}
-                        local rs = ds:readSetting("stats") or {}
-                        state.prefetched_data[fp] = {
-                            percent              = ds:readSetting("percent_finished") or 0,
-                            title                = rp.title,
-                            authors              = rp.authors,
-                            doc_pages            = ds:readSetting("doc_pages"),
-                            partial_md5_checksum = ds:readSetting("partial_md5_checksum"),
-                            stat_pages           = rs.pages,
-                            stat_total_time      = rs.total_time_in_sec,
-                        }
-                        pcall(function() ds:close() end)
+                    local cached = _cacheGet(fp)
+                    if cached then
+                        state.prefetched_data[fp] = cached
                     else
-                        -- Signal that DS.open was attempted but failed — getBookData
-                        -- will skip the lfs.attributes syscall and DS.open retry.
-                        state.prefetched_data[fp] = false
+                        local ok2, ds = pcall(DS.open, DS, fp)
+                        if ok2 and ds then
+                            local rp = ds:readSetting("doc_props") or {}
+                            local rs = ds:readSetting("stats") or {}
+                            local data = {
+                                percent              = ds:readSetting("percent_finished") or 0,
+                                title                = rp.title,
+                                authors              = rp.authors,
+                                doc_pages            = ds:readSetting("doc_pages"),
+                                partial_md5_checksum = ds:readSetting("partial_md5_checksum"),
+                                stat_pages           = rs.pages,
+                                stat_total_time      = rs.total_time_in_sec,
+                                summary              = ds:readSetting("summary"),
+                            }
+                            _cachePut(fp, ds.source_candidate, data)
+                            pcall(function() ds:close() end)
+                            state.prefetched_data[fp] = data
+                        else
+                            -- Signal that DS.open was attempted but failed — getBookData
+                            -- will skip the lfs.attributes syscall and DS.open retry.
+                            state.prefetched_data[fp] = false
+                        end
                     end
                 end
             elseif show_recent and #state.recent_fps < 5 then
@@ -364,23 +431,32 @@ function SH.prefetchBooks(show_currently, show_recent)
                 -- is correctly included in recent rather than being skipped.
                 local pct = 0
                 if DS then
-                    local ok2, ds = pcall(DS.open, DS, fp)
-                    if ok2 and ds then
-                        pct    = ds:readSetting("percent_finished") or 0
-                        local rp = ds:readSetting("doc_props") or {}
-                        local rs = ds:readSetting("stats") or {}
-                        state.prefetched_data[fp] = {
-                            percent              = pct,
-                            title                = rp.title,
-                            authors              = rp.authors,
-                            doc_pages            = ds:readSetting("doc_pages"),
-                            partial_md5_checksum = ds:readSetting("partial_md5_checksum"),
-                            stat_pages           = rs.pages,
-                            stat_total_time      = rs.total_time_in_sec,
-                        }
-                        pcall(function() ds:close() end)
+                    local cached = _cacheGet(fp)
+                    if cached then
+                        pct = cached.percent
+                        state.prefetched_data[fp] = cached
                     else
-                        state.prefetched_data[fp] = false
+                        local ok2, ds = pcall(DS.open, DS, fp)
+                        if ok2 and ds then
+                            pct    = ds:readSetting("percent_finished") or 0
+                            local rp = ds:readSetting("doc_props") or {}
+                            local rs = ds:readSetting("stats") or {}
+                            local data = {
+                                percent              = pct,
+                                title                = rp.title,
+                                authors              = rp.authors,
+                                doc_pages            = ds:readSetting("doc_pages"),
+                                partial_md5_checksum = ds:readSetting("partial_md5_checksum"),
+                                stat_pages           = rs.pages,
+                                stat_total_time      = rs.total_time_in_sec,
+                                summary              = ds:readSetting("summary"),
+                            }
+                            _cachePut(fp, ds.source_candidate, data)
+                            pcall(function() ds:close() end)
+                            state.prefetched_data[fp] = data
+                        else
+                            state.prefetched_data[fp] = false
+                        end
                     end
                 end
                 if pct < 1.0 then state.recent_fps[#state.recent_fps + 1] = fp end
@@ -439,14 +515,38 @@ function SH.countMarkedRead(year_str)
     for _, entry in ipairs(ReadHistory.hist) do
         local fp = entry.file
         if fp and lfs.attributes(fp, "mode") == "file" then
-            local ok_open, doc_settings = pcall(function() return DocSettings:open(fp) end)
-            if ok_open and doc_settings then
-                local ok_sum, summary = pcall(function() return doc_settings:readSetting("summary") end)
-                if ok_sum and type(summary) == "table" and summary.status == "complete"
-                    and modifiedInYear(summary) then
-                    count = count + 1
+            -- Fast path: use the sidecar cache if valid. summary was stored by
+            -- prefetchBooks (or a previous countMarkedRead miss) so most calls
+            -- after the first homescreen render cost only 1 lfs.attributes each.
+            local cached = _cacheGet(fp)
+            local summary
+            if cached then
+                summary = cached.summary
+            else
+                -- Cache miss — open the sidecar and store everything we read
+                -- so future calls (and prefetchBooks) can skip the dofile.
+                local ok_open, doc_settings = pcall(function() return DocSettings:open(fp) end)
+                if ok_open and doc_settings then
+                    summary = doc_settings:readSetting("summary")
+                    -- Build a minimal data entry so _cachePut has something to store.
+                    -- prefetchBooks will overwrite with the full entry when it runs.
+                    local data = {
+                        percent              = doc_settings:readSetting("percent_finished") or 0,
+                        title                = (doc_settings:readSetting("doc_props") or {}).title,
+                        authors              = (doc_settings:readSetting("doc_props") or {}).authors,
+                        doc_pages            = doc_settings:readSetting("doc_pages"),
+                        partial_md5_checksum = doc_settings:readSetting("partial_md5_checksum"),
+                        stat_pages           = (doc_settings:readSetting("stats") or {}).pages,
+                        stat_total_time      = (doc_settings:readSetting("stats") or {}).total_time_in_sec,
+                        summary              = summary,
+                    }
+                    _cachePut(fp, doc_settings.source_candidate, data)
+                    pcall(function() doc_settings:close() end)
                 end
-                pcall(function() doc_settings:close() end)
+            end
+            if type(summary) == "table" and summary.status == "complete"
+                    and modifiedInYear(summary) then
+                count = count + 1
             end
         end
     end

@@ -273,6 +273,15 @@ function SimpleUIPlugin:onCloseDocument()
         needs_refresh = true
     end
     if not needs_refresh then return end
+    -- Invalidate the sidecar cache entry for the book that just closed so the
+    -- next prefetchBooks() re-reads its updated sidecar (percent_finished, stats).
+    -- All other entries remain valid — they haven't changed.
+    local ok_sh, SH = pcall(require, "desktop_modules/module_books_shared")
+    if ok_sh and SH and SH.invalidateSidecarCache then
+        local rh = package.loaded["readhistory"]
+        local closed_fp = rh and rh.hist and rh.hist[1] and rh.hist[1].file
+        SH.invalidateSidecarCache(closed_fp)  -- nil flushes all; fp invalidates only that entry
+    end
     if HS._instance then
         -- If Currently Reading is active we must do a full refresh so
         -- prefetchBooks() re-reads the updated progress from the sidecar.
