@@ -1070,6 +1070,12 @@ local function _installSeriesGrouping()
     -- refreshPath: re-enter the virtual folder after a reload (e.g. after
     -- closing a book and returning to the library).
     FileChooser.refreshPath = function(fc)
+        -- Always flush the item cache before rebuilding the list so that
+        -- status changes (long-press dialog, book close, etc.) are reflected
+        -- immediately — the cache key does not encode per-book status/percent,
+        -- so stale entries would otherwise survive until restart.
+        _cache = {}
+        _cache_count = 0
         _sg_orig_refreshPath(fc)
         if not M.getSeriesGrouping() then return end
         if not _sg_current then return end
