@@ -1653,7 +1653,7 @@ msgstr "Nasconde la barra di paginazione nella schermata iniziale.\nNon disponib
 
 #: sui_menu.lua:1566
 msgid "Modules per Page  (%d)"
-msgstr "Moduli per Pagina  —  %d%%"
+msgstr "Moduli per Pagina  (%d)"
 
 #: sui_menu.lua:1572
 msgid "Modules per Page"
